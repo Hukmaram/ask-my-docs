@@ -6,6 +6,7 @@ import { ArxivClient } from '../src/ingestion/sources/arxiv.client.js';
 import { PdfDownloader } from '../src/ingestion/downloaders/pdf.downloader.js';
 import { PdfLoader } from '../src/ingestion/loaders/pdf.loader.js';
 import { DocumentChunker } from '../src/ingestion/chunkers/document.chunker.js';
+import { EmbeddingService } from '../src/embeddings/embedding.service.js';
 
 const PROCESSED_DATA_DIR = path.resolve(
   'data/processed',
@@ -37,6 +38,9 @@ async function main(): Promise<void> {
   const pdfLoader = new PdfLoader();
 
   const chunker = new DocumentChunker();
+
+  const embeddingService =
+    new EmbeddingService();
 
   /*
    * -------------------------------------------------------
@@ -129,13 +133,40 @@ async function main(): Promise<void> {
 
     /*
      * ---------------------------------------------------
+     * CREATE EMBEDDINGS
+     * ---------------------------------------------------
+     *
+     * DocumentChunk[] →
+     * EmbeddedDocumentChunk[]
+     *
+     * Ollama generates a 768-dimensional
+     * vector for every chunk.
+     */
+
+    console.log(
+      'Generating embeddings with Ollama...',
+    );
+
+    const embeddedChunks =
+      await embeddingService.embedChunks(
+        chunks,
+      );
+
+    console.log(
+      `Embeddings: ${embeddedChunks.length}`,
+    );
+
+    /*
+     * ---------------------------------------------------
      * CREATE PROCESSED DOCUMENT
      * ---------------------------------------------------
      *
-     * We save everything we currently have.
+     * We save:
      *
-     * This is temporary persistence for inspecting the
-     * ingestion pipeline.
+     * - paper metadata
+     * - extracted pages
+     * - chunks
+     * - embeddings
      */
 
     const result = {
@@ -151,7 +182,7 @@ async function main(): Promise<void> {
 
       pages,
 
-      chunks,
+      chunks: embeddedChunks,
     };
 
     /*
@@ -189,7 +220,8 @@ async function main(): Promise<void> {
     console.log(
       `Completed ${paper.id}: ` +
       `${pages.length} pages → ` +
-      `${chunks.length} chunks`,
+      `${chunks.length} chunks → ` +
+      `${embeddedChunks.length} embeddings`,
     );
   }
 }
@@ -207,6 +239,5 @@ main().catch((error: unknown) => {
 
   console.error(error);
 
-  //process.exit(1);
+  // process.exit(1);
 });
-

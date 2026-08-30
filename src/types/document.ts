@@ -19,3 +19,15 @@ export interface DocumentChunk {
   pageNumbers: number[];
   metadata: Record<string, unknown>;
 }
+
+
+export interface DocumentEmbedding {
+  model: string;
+  dimensions: number;
+  vector: number[];
+}
+
+export interface EmbeddedDocumentChunk
+  extends DocumentChunk {
+  embedding: DocumentEmbedding;
+}
