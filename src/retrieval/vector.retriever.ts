@@ -8,6 +8,7 @@ import type {
 import {
   EmbeddingService,
 } from '../embeddings/embedding.service.js';
+import { RetrievalResult } from '../types/retrieval.js';
 
 const PROCESSED_DATA_DIR = path.resolve(
   'data/processed',
@@ -17,10 +18,6 @@ interface ProcessedDocument {
   chunks: EmbeddedDocumentChunk[];
 }
 
-export interface RetrievalResult {
-  chunk: EmbeddedDocumentChunk;
-  score: number;
-}
 
 export class VectorRetriever {
   constructor(

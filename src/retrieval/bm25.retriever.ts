@@ -4,15 +4,12 @@ import path from 'node:path';
 import type {
   EmbeddedDocumentChunk,
 } from '../types/document.js';
+import type { RetrievalResult } from '../types/retrieval.js';
 
 const PROCESSED_DATA_DIR = path.resolve(
   'data/processed',
 );
 
-export interface BM25RetrievalResult {
-  chunk: EmbeddedDocumentChunk;
-  score: number;
-}
 
 interface ProcessedDocument {
   chunks: EmbeddedDocumentChunk[];
@@ -32,7 +29,7 @@ export class BM25Retriever {
   async retrieve(
     query: string,
     topK = 5,
-  ): Promise<BM25RetrievalResult[]> {
+  ): Promise<RetrievalResult[]> {
 
     const chunks =
       await this.loadChunks();
