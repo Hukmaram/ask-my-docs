@@ -53,7 +53,34 @@ const MIN_COLUMN_GAP = 20;
  * treated as *that* gutter, rather than an unrelated gap
  * (e.g. spacing in an author list or a table).
  */
-const GUTTER_TOLERANCE = 60;
+const GUTTER_TOLERANCE = 70;
+
+/*
+ * Width of each bucket (in PDF points) used when scanning
+ * for the empty vertical band that separates two columns.
+ */
+const GUTTER_BIN_WIDTH = 4;
+
+/*
+ * We only search for the gutter within the central portion
+ * of the page, so that left/right page margins are never
+ * mistaken for a column gutter.
+ */
+const GUTTER_SEARCH_MARGIN = 0.2;
+
+/*
+ * Minimum number of items required on a page before we
+ * trust a gutter computed from it.
+ */
+const MIN_ITEMS_FOR_GUTTER = 20;
+
+/*
+ * A row must span at least this fraction of the page width to be
+ * trusted as a genuine "both columns present" row when voting on
+ * the gutter position. Centered header lines (title, authors) are
+ * usually narrower than this even though they look wide.
+ */
+const GUTTER_VOTING_WIDTH_RATIO = 0.7;
 
 export class PdfLoader {
   async load(buffer: Buffer): Promise<DocumentPage[]> {
@@ -118,26 +145,36 @@ export class PdfLoader {
       return normalizeText(this.renderLines(rows));
     }
 
-    const pageMinX = Math.min(...rows.map((row) => row.minX));
-    const pageMaxX = Math.max(...rows.map((row) => row.maxX));
-    const pageWidth = pageMaxX - pageMinX;
+    /*
+     * Step 2: find the column gutter directly from raw item
+     * positions - the widest completely empty vertical band in
+     * the central part of the page. This does NOT depend on rows
+     * lining up between columns, so it stays reliable even on
+     * pages where the two columns drift out of sync (figures,
+     * footnotes, uneven paragraph lengths, etc).
+     */
+    const pageMinX = Math.min(...items.map((item) => item.x));
+    const pageMaxX = Math.max(
+      ...items.map((item) => item.x + item.width),
+    );
 
-    const gutterX =
-      pageWidth > 0 ? this.computeGutterX(rows, pageWidth) : null;
+    const gutterX = this.computeGutterX(rows, pageMinX, pageMaxX);
 
     if (gutterX === null) {
       // No consistent column gutter found anywhere on the page.
       return normalizeText(this.renderLines(rows));
     }
 
+    const pageWidth = pageMaxX - pageMinX;
+
     const { leftLines, rightLines, fullWidthLines } =
       this.splitRowsAtGutter(rows, gutterX, pageWidth);
 
-    if (
-      leftLines.length < MIN_COLUMN_LINES ||
-      rightLines.length < MIN_COLUMN_LINES
-    ) {
-      // Not a genuine two-column page - fall back to plain top-to-bottom order.
+    if (leftLines.length === 0 || rightLines.length === 0) {
+      // Nothing meaningful landed on one side - not really a
+      // two-column page. Falling back here is safe: we only
+      // reach it when the gutter signal didn't actually produce
+      // a real split, so the raw rows were never miscategorized.
       return normalizeText(this.renderLines(rows));
     }
 
@@ -202,69 +239,139 @@ export class PdfLoader {
   }
 
   /**
-   * Find the page's column gutter (if any) by looking at the
-   * largest internal horizontal gap in every sufficiently wide row,
-   * then taking the median of those gap midpoints.
+   * Find the page's column gutter (if any) by scanning rows for
+   * the widest vertical band that almost no row ever has text in.
    *
-   * Only rows that already span at least half the page are
-   * considered, since those are the rows most likely to contain
-   * text from both columns (and therefore reveal where the true
-   * gutter sits). Narrow rows near the gutter width would just add
-   * noise.
+   * We deliberately weight by ROW occupancy rather than raw item
+   * occupancy: a single full-width row (title, a centered caption)
+   * can span straight across where the gutter would otherwise be,
+   * and counting every item would let that one row mask the gutter
+   * entirely. By counting at most one "touch" per row per bin, a
+   * lone wide header row can't outweigh the dozens of body rows
+   * that never go near the gutter - we tolerate a small number of
+   * rows touching a bin rather than requiring zero.
+   *
+   * This still doesn't require both columns to have text at the
+   * same y-position to reveal the gutter, so it stays reliable even
+   * when the two columns drift out of sync (figures, footnotes,
+   * uneven paragraph lengths).
    */
   private computeGutterX(
     rows: TextLine[],
-    pageWidth: number,
+    pageMinX: number,
+    pageMaxX: number,
   ): number | null {
-    const gapMidpoints: number[] = [];
+    const pageWidth = pageMaxX - pageMinX;
 
-    for (const row of rows) {
-      if (row.items.length < 2) {
-        continue;
-      }
-
-      if (row.maxX - row.minX < pageWidth * 0.5) {
-        continue;
-      }
-
-      let bestGap = 0;
-      let bestMid = 0;
-
-      for (let i = 0; i < row.items.length - 1; i++) {
-        const current = row.items[i];
-        const next = row.items[i + 1];
-
-        if (!current || !next) {
-          continue;
-        }
-
-        const gap = next.x - (current.x + current.width);
-
-        if (gap > bestGap) {
-          bestGap = gap;
-          bestMid = (current.x + current.width + next.x) / 2;
-        }
-      }
-
-      if (bestGap >= MIN_COLUMN_GAP) {
-        gapMidpoints.push(bestMid);
-      }
-    }
-
-    if (gapMidpoints.length < MIN_COLUMN_LINES) {
+    if (pageWidth <= 0 || rows.length < MIN_COLUMN_LINES) {
       return null;
     }
 
-    gapMidpoints.sort((a, b) => a - b);
+    /*
+     * Only rows that already span most of the page width are used
+     * to vote on the gutter position. This is the key filter that
+     * keeps a centered title/author/affiliation block from masking
+     * the gutter: those lines are single continuous runs of text
+     * with no internal gap, so even though they're fairly wide,
+     * they rarely reach the width of two real columns plus the
+     * gutter between them. A row where BOTH columns have text at
+     * the same y, by contrast, necessarily spans close to the full
+     * page width. Excluding narrower rows here does not exclude
+     * them from later classification - it only keeps them out of
+     * the gutter vote.
+     */
+    const votingRows = rows.filter(
+      (row) => row.maxX - row.minX >= pageWidth * GUTTER_VOTING_WIDTH_RATIO,
+    );
 
-    const mid = Math.floor(gapMidpoints.length / 2);
+    const totalItems = votingRows.reduce(
+      (sum, row) => sum + row.items.length,
+      0,
+    );
 
-    const median =
-      gapMidpoints.length % 2 === 0
-        ? ((gapMidpoints[mid - 1] ?? 0) + (gapMidpoints[mid] ?? 0)) / 2
-        : (gapMidpoints[mid] ?? 0);
+    if (
+      votingRows.length < MIN_COLUMN_LINES ||
+      totalItems < MIN_ITEMS_FOR_GUTTER
+    ) {
+      return null;
+    }
 
-    return median;
+    const binCount = Math.ceil(pageWidth / GUTTER_BIN_WIDTH);
+    const rowsTouchingBin = new Array<number>(binCount).fill(0);
+
+    for (const row of votingRows) {
+      const touchedBins = new Set<number>();
+
+      for (const item of row.items) {
+        const startBin = Math.max(
+          0,
+          Math.floor((item.x - pageMinX) / GUTTER_BIN_WIDTH),
+        );
+        const endBin = Math.min(
+          binCount - 1,
+          Math.floor(
+            (item.x + item.width - pageMinX) / GUTTER_BIN_WIDTH,
+          ),
+        );
+
+        for (let bin = startBin; bin <= endBin; bin++) {
+          touchedBins.add(bin);
+        }
+      }
+
+      for (const bin of touchedBins) {
+        const current = rowsTouchingBin[bin];
+        rowsTouchingBin[bin] = (current ?? 0) + 1;
+      }
+    }
+
+    // Among the already-filtered wide rows, allow a small amount of
+    // noise (a stray wide caption, an equation) without disqualifying
+    // a bin - only a band that's almost always empty counts.
+    const occupancyThreshold = Math.max(
+      0,
+      Math.floor(votingRows.length * 0.05),
+    );
+
+    // Restrict the search to the central portion of the page so
+    // that left/right margins are never mistaken for a gutter.
+    const searchStart = Math.floor(binCount * GUTTER_SEARCH_MARGIN);
+    const searchEnd = Math.ceil(
+      binCount * (1 - GUTTER_SEARCH_MARGIN),
+    );
+
+    let bestRunStart = -1;
+    let bestRunLength = 0;
+    let runStart = -1;
+
+    for (let bin = searchStart; bin <= searchEnd; bin++) {
+      const count = rowsTouchingBin[bin] ?? 0;
+
+      if (count <= occupancyThreshold) {
+        if (runStart === -1) {
+          runStart = bin;
+        }
+
+        const runLength = bin - runStart + 1;
+
+        if (runLength > bestRunLength) {
+          bestRunLength = runLength;
+          bestRunStart = runStart;
+        }
+      } else {
+        runStart = -1;
+      }
+    }
+
+    const bestRunWidth = bestRunLength * GUTTER_BIN_WIDTH;
+
+    if (bestRunStart === -1 || bestRunWidth < MIN_COLUMN_GAP) {
+      return null;
+    }
+
+    const gutterBinCenter = bestRunStart + bestRunLength / 2;
+
+    return pageMinX + gutterBinCenter * GUTTER_BIN_WIDTH;
   }
 
   /**
@@ -291,6 +398,19 @@ export class PdfLoader {
     const leftLines: TextLine[] = [];
     const rightLines: TextLine[] = [];
     const fullWidthLines: TextLine[] = [];
+
+    /*
+     * Track the y-position of every row that was genuinely split
+     * (i.e. had real content on both sides of the gutter). A title
+     * or author/affiliation line is a single continuous run of text
+     * with no internal gap at the gutter, so it is never split -
+     * only true two-column body rows are. The topmost split row
+     * therefore marks where the real two-column body begins; we use
+     * that below to pull any header content above it out of the
+     * columns, even if that header content is too narrow to trip
+     * the FULL_WIDTH_RATIO check on its own.
+     */
+    let topSplitY: number | null = null;
 
     for (const row of rows) {
       let splitIndex = -1;
@@ -328,6 +448,10 @@ export class PdfLoader {
         leftLines.push(this.rowFromItems(leftItems));
         rightLines.push(this.rowFromItems(rightItems));
 
+        if (topSplitY === null || row.y > topSplitY) {
+          topSplitY = row.y;
+        }
+
         continue;
       }
 
@@ -345,7 +469,28 @@ export class PdfLoader {
       }
     }
 
-    return { leftLines, rightLines, fullWidthLines };
+    if (topSplitY === null) {
+      return { leftLines, rightLines, fullWidthLines };
+    }
+
+    const promoted: TextLine[] = [];
+
+    const keepBelowHeader = (line: TextLine): boolean => {
+      if (line.y > topSplitY) {
+        promoted.push(line);
+        return false;
+      }
+      return true;
+    };
+
+    const finalLeft = leftLines.filter(keepBelowHeader);
+    const finalRight = rightLines.filter(keepBelowHeader);
+
+    return {
+      leftLines: finalLeft,
+      rightLines: finalRight,
+      fullWidthLines: [...fullWidthLines, ...promoted],
+    };
   }
 
   private rowFromItems(items: PositionedTextItem[]): TextLine {
