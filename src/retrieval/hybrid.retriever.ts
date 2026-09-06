@@ -74,6 +74,7 @@ export class HybridRetriever {
     const result: RetrievalResult = {
       chunk: candidate.chunk,
       score: candidate.score,
+      rrfScore: candidate.score,
     };
 
     if (candidate.vectorScore !== undefined) {
