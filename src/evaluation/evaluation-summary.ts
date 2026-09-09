@@ -7,16 +7,9 @@ export interface RetrievalMetrics {
 
 export interface GenerationQuestionResult {
   questionId: string;
-
   faithfulness: number;
   relevance: number;
-
-  /**
-   * 1 = citations are valid
-   * 0 = citations are invalid
-   */
   citationValidity: number;
-
   passed: boolean;
 }
 
@@ -25,7 +18,6 @@ export interface GenerationMetrics {
   relevance: number;
   citationValidity: number;
   generationPassRate: number;
-
   results: GenerationQuestionResult[];
 }
 
@@ -48,18 +40,12 @@ export interface EvaluationSummary {
   retrieval: RetrievalMetrics;
   generation: GenerationMetrics;
   thresholds: QualityThresholds;
-
   qualityGate: {
     passed: boolean;
     results: QualityGateResult[];
   };
 }
 
-/**
- * Calculates aggregate generation metrics and determines
- * whether each individual question passes the generation
- * quality criteria.
- */
 export function calculateGenerationMetrics(
   results: GenerationQuestionResult[],
   thresholds: Pick<
@@ -112,10 +98,6 @@ export function calculateGenerationMetrics(
   };
 }
 
-/**
- * Determines whether the complete RAG system passes
- * the configured quality thresholds.
- */
 export function evaluateQualityGate(
   retrieval: RetrievalMetrics,
   generation: GenerationMetrics,
@@ -132,7 +114,6 @@ export function evaluateQualityGate(
         retrieval.rerankedRecallAt5 >=
         thresholds.rerankedRecallAt5,
     },
-
     {
       metric: 'Faithfulness',
       actual:
@@ -143,7 +124,6 @@ export function evaluateQualityGate(
         generation.faithfulness >=
         thresholds.faithfulness,
     },
-
     {
       metric: 'Answer Relevance',
       actual:
@@ -154,7 +134,6 @@ export function evaluateQualityGate(
         generation.relevance >=
         thresholds.relevance,
     },
-
     {
       metric: 'Citation Validity',
       actual:
@@ -165,7 +144,6 @@ export function evaluateQualityGate(
         generation.citationValidity >=
         thresholds.citationValidity,
     },
-
     {
       metric: 'Generation Pass Rate',
       actual:
@@ -182,7 +160,6 @@ export function evaluateQualityGate(
     retrieval,
     generation,
     thresholds,
-
     qualityGate: {
       passed: results.every(
         (result) => result.passed,
