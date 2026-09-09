@@ -1,3 +1,8 @@
+import '../instrumentation.js';
+import {
+  startActiveObservation,
+} from '@langfuse/tracing';
+
 import { HybridRetriever } from '../retrieval/hybrid.retriever.js';
 
 import type { RetrievalResult } from '../types/retrieval.js';
@@ -6,110 +11,471 @@ import type { Reranker } from '../reranking/reranker.js';
 
 import { buildRagPrompt } from '../prompts/rag.prompt.js';
 
-
-
 import { OllamaClient } from '../llm/ollama.client.js';
-import { validateCitations } from '../evaluation/citations/citation-validator.js';
-import { repairCitations } from '../evaluation/citations/citation-repair.js';
-import { FaithfulnessEvaluator, FaithfulnessResult } from '../evaluation/faithfulness/faithfulness-evaluator.js';
 
+import {
+  validateCitations,
+  type CitationValidationResult,
+} from '../evaluation/citations/citation-validator.js';
+
+import { repairCitations } from '../evaluation/citations/citation-repair.js';
+
+import {
+  FaithfulnessEvaluator,
+  type FaithfulnessResult,
+} from '../evaluation/faithfulness/faithfulness-evaluator.js';
+
+import {
+  AnswerRelevanceEvaluator,
+  type AnswerRelevanceResult,
+} from '../evaluation/relevance/answer-relevance-evaluator.js';
 
 export interface AskMyDocsResponse {
   answer: string;
   sources: RetrievalResult[];
   citations: string[];
-   faithfulness?: FaithfulnessResult;
+
+  citationValidation: CitationValidationResult;
+
+  faithfulness?: FaithfulnessResult;
+  relevance?: AnswerRelevanceResult;
 }
 
 export class AskMyDocsAgent {
- constructor(
-  private readonly retriever: HybridRetriever,
-  private readonly reranker: Reranker,
-  private readonly faithfulnessEvaluator: FaithfulnessEvaluator,
-  private readonly llm = new OllamaClient(),
-) {}
+  constructor(
+    private readonly retriever: HybridRetriever,
+    private readonly reranker: Reranker,
+    private readonly faithfulnessEvaluator: FaithfulnessEvaluator,
+    private readonly relevanceEvaluator: AnswerRelevanceEvaluator,
+    private readonly llm = new OllamaClient(),
+  ) {}
 
-  async ask(query: string): Promise<AskMyDocsResponse> {
-     if (!query.trim()) {
+  async ask(
+    query: string,
+  ): Promise<AskMyDocsResponse> {
+    if (!query.trim()) {
       throw new Error('Query cannot be empty');
     }
-    // 1. Retrieve
-    const candidates = await this.retriever.retrieve(query);
 
-    // 2. Rerank
-    if (candidates.length === 0) {
-      return {
-        answer: 'I could not find relevant information in the available documents.',
-        sources: [],
-        citations: [],
-      };
-    }
-    const reranked = await this.reranker.rerank(
-      query,
-      candidates,
-      5,
+    return startActiveObservation(
+      'ask-my-docs',
+      async (trace) => {
+        trace.update({
+          input: {
+            query,
+          },
+        });
+
+        try {
+          /*
+           * ==========================================
+           * 1. RETRIEVAL
+           * ==========================================
+           */
+
+          const candidates =
+            await startActiveObservation(
+              'retrieval',
+              async (retrieval) => {
+                retrieval.update({
+                  input: {
+                    query,
+                  },
+                });
+
+                const results =
+                  await this.retriever.retrieve(query);
+
+                retrieval.update({
+                  output: {
+                    resultCount: results.length,
+                    chunkIds: results.map(
+                      (result) =>
+                        result.chunk.id,
+                    ),
+                  },
+                  metadata: {
+                    topK: String(
+                      results.length,
+                    ),
+                  },
+                });
+
+                return results;
+              },
+              {
+                asType: 'retriever',
+              },
+            );
+
+          /*
+           * ==========================================
+           * NO RESULTS
+           * ==========================================
+           */
+
+          if (candidates.length === 0) {
+            const answer =
+              'I could not find relevant information in the available documents.';
+
+            const response: AskMyDocsResponse =
+              {
+                answer,
+                sources: [],
+                citations: [],
+                citationValidation: {
+                  valid: false,
+                  citations: [],
+                  invalidCitations: [],
+                  missingCitations: true,
+                  uncitedSentences: [],
+                },
+              };
+
+            trace.update({
+              output: response,
+            });
+
+            return response;
+          }
+
+          /*
+           * ==========================================
+           * 2. RERANKING
+           * ==========================================
+           */
+
+          const reranked =
+            await startActiveObservation(
+              'reranking',
+              async (reranking) => {
+                reranking.update({
+                  input: {
+                    query,
+                    candidateCount:
+                      candidates.length,
+                    candidateIds:
+                      candidates.map(
+                        (candidate) =>
+                          candidate.chunk.id,
+                      ),
+                  },
+                });
+
+                const results =
+                  await this.reranker.rerank(
+                    query,
+                    candidates,
+                    5,
+                  );
+
+                reranking.update({
+                  output: {
+                    resultCount:
+                      results.length,
+                    chunkIds: results.map(
+                      (result) =>
+                        result.chunk.id,
+                    ),
+                    scores: results.map(
+                      (result) =>
+                        result.rerankScore ??
+                        result.score,
+                    ),
+                  },
+                });
+
+                return results;
+              },
+            );
+
+          const sources =
+            reranked.slice(0, 2);
+
+          /*
+           * ==========================================
+           * 3. GENERATION
+           * ==========================================
+           *
+           * OllamaClient.generate() creates the
+           * generation observation.
+           */
+
+          const prompt =
+            buildRagPrompt(
+              query,
+              sources,
+            );
+
+          let answer =
+            await this.llm.generate(prompt);
+
+          /*
+           * ==========================================
+           * 4. CITATION VALIDATION
+           * ==========================================
+           */
+
+          let citationValidation =
+            await startActiveObservation(
+              'citation-validation',
+              async (validation) => {
+                const result =
+                  validateCitations(
+                    answer,
+                    sources,
+                  );
+
+                validation.update({
+                  input: {
+                    answer,
+                  },
+                  output: {
+                    valid: result.valid,
+                    citations:
+                      result.citations,
+                    invalidCitations:
+                      result.invalidCitations,
+                    missingCitations:
+                      result.missingCitations,
+                    uncitedSentenceCount:
+                      result.uncitedSentences
+                        .length,
+                  },
+                });
+
+                return result;
+              },
+              {
+                asType: 'evaluator',
+              },
+            );
+
+          /*
+           * ==========================================
+           * 5. CITATION REPAIR
+           * ==========================================
+           */
+
+          if (!citationValidation.valid) {
+            answer =
+              await startActiveObservation(
+                'citation-repair',
+                async (repair) => {
+                  repair.update({
+                    input: {
+                      answer,
+                    },
+                  });
+
+                  const repaired =
+                    repairCitations(
+                      answer,
+                      sources,
+                    );
+
+                  repair.update({
+                    output: {
+                      changed:
+                        repaired !== answer,
+                      answer: repaired,
+                    },
+                  });
+
+                  return repaired;
+                },
+              );
+
+            /*
+             * Re-validate after repair.
+             */
+
+            citationValidation =
+              await startActiveObservation(
+                'citation-validation-after-repair',
+                async (validation) => {
+                  const result =
+                    validateCitations(
+                      answer,
+                      sources,
+                    );
+
+                  validation.update({
+                    input: {
+                      answer,
+                    },
+                    output: {
+                      valid:
+                        result.valid,
+                      citations:
+                        result.citations,
+                      invalidCitations:
+                        result.invalidCitations,
+                      missingCitations:
+                        result.missingCitations,
+                      uncitedSentenceCount:
+                        result
+                          .uncitedSentences
+                          .length,
+                    },
+                  });
+
+                  return result;
+                },
+                {
+                  asType: 'evaluator',
+                },
+              );
+          }
+
+          /*
+           * ==========================================
+           * CITATION FAILURE
+           * ==========================================
+           *
+           * Do not run faithfulness/relevance if
+           * citation validation still fails.
+           */
+
+          if (!citationValidation.valid) {
+            const response: AskMyDocsResponse =
+              {
+                answer,
+                sources,
+                citations:
+                  citationValidation.citations,
+                citationValidation,
+              };
+
+            trace.update({
+              output: response,
+            });
+
+            return response;
+          }
+
+          /*
+           * ==========================================
+           * 6. FAITHFULNESS
+           * ==========================================
+           *
+           * FaithfulnessEvaluator internally calls
+           * OllamaClient.generate(), which creates
+           * a nested generation observation.
+           */
+
+          const faithfulness =
+            await startActiveObservation(
+              'faithfulness',
+              async (evaluation) => {
+                const result =
+                  await this.faithfulnessEvaluator.evaluate(
+                    answer,
+                    sources,
+                  );
+
+                evaluation.update({
+                  input: {
+                    answer,
+                  },
+                  output: {
+                    score: result.score,
+                    claims: result.claims,
+                  },
+                });
+
+                return result;
+              },
+              {
+                asType: 'evaluator',
+              },
+            );
+
+          /*
+           * ==========================================
+           * 7. ANSWER RELEVANCE
+           * ==========================================
+           */
+
+          const relevance =
+            await startActiveObservation(
+              'answer-relevance',
+              async (evaluation) => {
+                const result =
+                  await this.relevanceEvaluator.evaluate(
+                    query,
+                    answer,
+                  );
+
+                evaluation.update({
+                  input: {
+                    question: query,
+                    answer,
+                  },
+                  output: {
+                    score: result.score,
+                    explanation:
+                      result.explanation,
+                  },
+                });
+
+                return result;
+              },
+              {
+                asType: 'evaluator',
+              },
+            );
+
+          /*
+           * ==========================================
+           * FINAL RESPONSE
+           * ==========================================
+           */
+
+          const response: AskMyDocsResponse =
+            {
+              answer,
+              sources,
+              citations:
+                citationValidation.citations,
+              citationValidation,
+              faithfulness,
+              relevance,
+            };
+
+          trace.update({
+            output: {
+              answer,
+              sourceCount:
+                sources.length,
+              citations:
+                citationValidation.citations,
+              citationValid:
+                citationValidation.valid,
+              faithfulness:
+                faithfulness.score,
+              relevance:
+                relevance.score,
+            },
+          });
+
+          return response;
+        } catch (error) {
+          trace.update({
+            output: {
+              error:
+                error instanceof Error
+                  ? error.message
+                  : String(error),
+            },
+          });
+
+          throw error;
+        }
+      },
+      {
+        asType: 'agent',
+      },
     );
-
-    // 3. Select final sources
-    const sources = reranked.slice(0, 2);
-
-    // 4. Generate answer
-    const prompt = buildRagPrompt(query, sources);
-
-    let answer = await this.llm.generate(prompt);
-
-    // 5. Validate citations
-    let citationResult = validateCitations(
-      answer,
-      sources,
-    );
-
-    // 6. Repair if necessary
-    if (!citationResult.valid) { 
-    console.log('\n===== CITATION VALIDATION FAILED =====');
-  console.log(citationResult);
-
-  console.log('\n===== REPAIRING CITATIONS =====');
-
-  answer = await repairCitations(
-    answer,
-    sources,
-    this.llm,
-  );
-
-  console.log('\n===== ANSWER AFTER REPAIR =====');
-  console.log(answer);
-
-  citationResult = validateCitations(
-    answer,
-    sources,
-  );
-
-  console.log('\n===== CITATION VALIDATION AFTER REPAIR =====');
-  console.log(citationResult)
-    }
-
-    if (!citationResult.valid) {
-      throw new Error(
-        `Citation validation failed after repair: ${JSON.stringify(
-          citationResult,
-        )}`,
-      );
-    }
-
-    // 7. Evaluate faithfulness
-    const faithfulness =
-      await this.faithfulnessEvaluator.evaluate(
-        answer,
-        sources,
-      );
-
-    // 8. Return complete response
-    return {
-      answer,
-      sources,
-      citations: citationResult.citations,
-      faithfulness,
-    };
   }
 }
