@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Inject,
   Post,
 } from '@nestjs/common';
 
@@ -11,6 +12,7 @@ import { ChatService } from './chat.service.js';
 @Controller('chat')
 export class ChatController {
   constructor(
+    @Inject(ChatService)
     private readonly chatService: ChatService,
   ) {}
 
