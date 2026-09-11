@@ -13,26 +13,22 @@ const baseUrl =
   process.env.LANGFUSE_BASE_URL ??
   'https://cloud.langfuse.com';
 
-if (!publicKey) {
-  throw new Error(
-    'LANGFUSE_PUBLIC_KEY is not configured',
-  );
+export let sdk: { start: () => void; shutdown: () => Promise<void> };
+
+if (publicKey && secretKey) {
+  sdk = new NodeSDK({
+    spanProcessors: [
+      new LangfuseSpanProcessor({
+        publicKey,
+        secretKey,
+        baseUrl,
+      }),
+    ],
+  });
+  sdk.start();
+} else {
+  sdk = {
+    start: () => {},
+    shutdown: async () => {},
+  };
 }
-
-if (!secretKey) {
-  throw new Error(
-    'LANGFUSE_SECRET_KEY is not configured',
-  );
-}
-
-export const sdk = new NodeSDK({
-  spanProcessors: [
-    new LangfuseSpanProcessor({
-      publicKey,
-      secretKey,
-      baseUrl,
-    }),
-  ],
-});
-
-sdk.start();

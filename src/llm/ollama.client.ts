@@ -2,7 +2,10 @@ import {
   startActiveObservation,
 } from '@langfuse/tracing';
 
-const OLLAMA_URL = 'http://localhost:11434';
+const OLLAMA_URL =
+  process.env.OLLAMA_BASE_URL ??
+  process.env.OLLAMA_URL ??
+  'http://localhost:11434';
 const MODEL = 'llama3.2:latest';
 
 interface OllamaGenerateResponse {

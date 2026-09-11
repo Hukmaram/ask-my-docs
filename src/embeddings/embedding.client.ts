@@ -1,4 +1,8 @@
-const OLLAMA_URL = 'http://localhost:11434/api/embed';
+const OLLAMA_BASE_URL =
+  process.env.OLLAMA_BASE_URL ??
+  process.env.OLLAMA_URL ??
+  'http://localhost:11434';
+const OLLAMA_URL = `${OLLAMA_BASE_URL.replace(/\/+$/, '')}/api/embed`;
 export const EMBEDDING_MODEL = 'nomic-embed-text';
 
 export class EmbeddingError extends Error {

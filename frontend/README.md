@@ -1,32 +1,45 @@
-# React + TypeScript + Vite
+# Ask My Docs — Frontend Client 💻
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+> Modern, citation-grounded React 19 Single Page Application (SPA) bundled with Vite and styled with custom vanilla CSS design tokens.
 
-Currently, two official plugins are available:
+---
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Features
 
-## React Compiler
+- **Query Interface**: Interactive chat prompt with real-time submission handling and loading state feedback.
+- **Citation-Grounded Answers**: Renders generated text with interactive, highlighted citation tags (e.g. `[SOURCE_1]`).
+- **Live Evaluation Inspector**: Displays real-time LLM-as-a-judge scores for Faithfulness, Claim Breakdown, and Answer Relevance.
+- **Source Explorer**: Inspects retrieved chunks, document metadata, page numbers, and similarity ranks.
+- **Dark Mode UI**: Curated aesthetic with glassmorphism effects, smooth micro-animations, and responsive layout.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+---
 
-## Expanding the Oxlint configuration
+## Tech Stack
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+- **React 19**
+- **TypeScript 5.9**
+- **Vite 8**
+- **NGINX** (Production container web server)
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+---
+
+## Local Development
+
+```bash
+# Install dependencies
+npm install
+
+# Start development server (HMR enabled)
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Application runs by default on [http://localhost:5173](http://localhost:5173).
+
+---
+
+## Production Build
+
+```bash
+npm run build
+```
+Compiled assets are emitted to the `dist/` directory and served via NGINX in containerized environments.
