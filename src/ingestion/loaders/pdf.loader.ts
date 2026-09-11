@@ -618,7 +618,7 @@ export class PdfLoader {
       return false;
     }
 
-    if (/[(\[{]$/.test(previous.text)) {
+    if (/[({[]$/.test(previous.text)) {
       return false;
     }
 
@@ -655,7 +655,7 @@ function normalizeText(value: string): string {
       /*
        * Remove spaces after opening punctuation.
        */
-      .replace(/([(\[{])\s+/g, '$1')
+      .replace(/([({[])\s+/g, '$1')
 
       /*
        * Collapse repeated spaces.

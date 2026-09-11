@@ -16,6 +16,7 @@ export function repairCitations(
   answer: string,
   _sources: RetrievalResult[],
 ): string {
+  void _sources;
   const sentences =
     splitSentencesWithCitations(answer);
 

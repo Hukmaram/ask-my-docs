@@ -1,0 +1,89 @@
+name: RAG Evaluation
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'data/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/rag-evaluation.yml'
+  workflow_dispatch:
+    inputs:
+      enforce_quality_gate:
+        description: 'Enforce quality gate strictly (fail build on threshold drop)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rag-evaluation:
+    name: Full RAG Evaluation
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: ask_my_docs
+          POSTGRES_USER: ask_my_docs
+          POSTGRES_PASSWORD: ask_my_docs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install & Launch Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull nomic-embed-text
+          ollama pull llama3.2
+
+      - name: Ingest Knowledge Base
+        env:
+          DATABASE_URL: postgresql://ask_my_docs:ask_my_docs@localhost:5432/ask_my_docs
+          RAG_RERANKER_ENABLED: false
+        run: npx tsx scripts/ingest.ts
+
+      - name: Run Canonical RAG Evaluation
+        env:
+          DATABASE_URL: postgresql://ask_my_docs:ask_my_docs@localhost:5432/ask_my_docs
+          RAG_RERANKER_ENABLED: false
+        run: |
+          if [ "${{ inputs.enforce_quality_gate }}" = "true" ]; then
+            npm run eval:ci
+          else
+            npm run eval:json
+          fi
+
+      - name: Upload Evaluation Summary Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-summary
+          path: dist/evaluation-summary.json
+          if-no-files-found: warn

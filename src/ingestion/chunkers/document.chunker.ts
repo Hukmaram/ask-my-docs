@@ -49,7 +49,7 @@ import type {
   DocumentPage,
 } from '../../types/document.js';
 
-const TARGET_CHUNK_SIZE = 700;
+export const TARGET_CHUNK_SIZE = 700;
 const MIN_CHUNK_SIZE = 500;
 const MAX_CHUNK_SIZE = 800;
 

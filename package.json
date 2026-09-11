@@ -14,7 +14,10 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "echo \"Tests not configured yet\""
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "eval": "tsx scripts/evaluation-runner.ts",
+    "eval:json": "tsx scripts/evaluation-runner.ts --json dist/evaluation-summary.json",
+    "eval:ci": "tsx scripts/evaluation-runner.ts --json dist/evaluation-summary.json --ci"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans": "^5.3.0",
