@@ -1,305 +1,138 @@
-import { readdir, readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { pool } from '../db/pool.js';
 
 import type {
   EmbeddedDocumentChunk,
 } from '../types/document.js';
-import type { RetrievalResult } from '../types/retrieval.js';
 
-const PROCESSED_DATA_DIR = path.resolve(
-  'data/processed',
-);
+import type {
+  RetrievalResult,
+} from '../types/retrieval.js';
 
-
-interface ProcessedDocument {
-  chunks: EmbeddedDocumentChunk[];
+interface LexicalRow {
+  id: string;
+  document_id: string;
+  chunk_index: number;
+  content: string;
+  page_numbers: number[];
+  metadata: Record<string, unknown>;
+  embedding_model: string | null;
+  score: number;
 }
-
-interface DocumentTerms {
-  chunk: EmbeddedDocumentChunk;
-  terms: string[];
-  termFrequency: Map<string, number>;
-  length: number;
-}
-
-const K1 = 1.2;
-const B = 0.75;
 
 export class BM25Retriever {
   async retrieve(
     query: string,
-    topK = 5,
+    topK = 10,
   ): Promise<RetrievalResult[]> {
-
-    const chunks =
-      await this.loadChunks();
-
-    if (chunks.length === 0) {
-      return [];
-    }
-
-    const queryTerms =
-      tokenize(query);
-
-    if (queryTerms.length === 0) {
-      return [];
-    }
-
-    const documents =
-      chunks.map((chunk) => {
-        const terms =
-          tokenize(chunk.content);
-
-        return {
-          chunk,
-          terms,
-          termFrequency:
-            buildTermFrequency(terms),
-          length: terms.length,
-        };
-      });
-
-    const averageDocumentLength =
-      documents.reduce(
-        (total, document) =>
-          total + document.length,
-        0,
-      ) / documents.length;
-
-
-    const documentFrequency =
-      buildDocumentFrequency(
-        documents,
-      );
-
-    const results =
-      documents.map((document) => ({
-        chunk: document.chunk,
-        score: calculateBM25Score(
-          queryTerms,
-          document,
-          documentFrequency,
-          documents.length,
-          averageDocumentLength,
-        ),
-      }));
-
-    results.sort(
-      (a, b) => b.score - a.score,
-    );
-
-    return results
-      .filter((result) => result.score > 0)
-      .slice(0, topK);
-  }
-
-  private async loadChunks(): Promise<
-    EmbeddedDocumentChunk[]
-  > {
-    const files =
-      await readdir(
-        PROCESSED_DATA_DIR,
-      );
-
-    const chunks: EmbeddedDocumentChunk[] = [];
-
-    for (const fileName of files) {
-      if (!fileName.endsWith('.json')) {
-        continue;
-      }
-
-      const filePath =
-        path.join(
-          PROCESSED_DATA_DIR,
-          fileName,
-        );
-
-      const file =
-        await readFile(
-          filePath,
-          'utf-8',
-        );
-
-      const document =
-        JSON.parse(
-          file,
-        ) as ProcessedDocument;
-
-      chunks.push(
-        ...document.chunks,
-      );
-    }
-
-    return chunks;
-  }
-}
-
-/*
- * -------------------------------------------------------
- * TOKENIZATION
- * -------------------------------------------------------
- *
- * BM25 needs words/terms rather than embeddings.
- *
- * We normalize:
- *
- * "Retrieval-Augmented Generation"
- *
- * into terms such as:
- *
- * ["retrieval", "augmented", "generation"]
- *
- * -------------------------------------------------------
- */
-
-function tokenize(
-  text: string,
-): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .split(/\s+/)
-    .filter(Boolean);
-}
-
-/*
- * -------------------------------------------------------
- * TERM FREQUENCY
- * -------------------------------------------------------
- */
-
-function buildTermFrequency(
-  terms: string[],
-): Map<string, number> {
-  const frequencies =
-    new Map<string, number>();
-
-  for (const term of terms) {
-    frequencies.set(
-      term,
-      (frequencies.get(term) ?? 0) + 1,
-    );
-  }
-
-  return frequencies;
-}
-
-/*
- * -------------------------------------------------------
- * DOCUMENT FREQUENCY
- * -------------------------------------------------------
- *
- * DF(term) =
- * number of documents containing the term.
- * -------------------------------------------------------
- */
-
-function buildDocumentFrequency(
-  documents: DocumentTerms[],
-): Map<string, number> {
-  const frequencies =
-    new Map<string, number>();
-
-  for (const document of documents) {
-    const uniqueTerms =
-      new Set(document.terms);
-
-    for (const term of uniqueTerms) {
-      frequencies.set(
-        term,
-        (frequencies.get(term) ?? 0) + 1,
-      );
-    }
-  }
-
-  return frequencies;
-}
-
-/*
- * -------------------------------------------------------
- * BM25 SCORE
- * -------------------------------------------------------
- *
- * BM25 =
- *
- * IDF ×
- *
- *      TF × (K1 + 1)
- * --------------------------------
- *      TF + K1 × (1 - B + B × DL / AVGDL)
- *
- * -------------------------------------------------------
- */
-
-function calculateBM25Score(
-  queryTerms: string[],
-  document: DocumentTerms,
-  documentFrequency: Map<string, number>,
-  totalDocuments: number,
-  averageDocumentLength: number,
-): number {
-  let score = 0;
-
-  for (const term of queryTerms) {
-    const termFrequency =
-      document.termFrequency.get(term) ?? 0;
-
-    if (termFrequency === 0) {
-      continue;
-    }
-
-    const frequency =
-      documentFrequency.get(term) ?? 0;
-
-    if (frequency === 0) {
-      continue;
-    }
-
     /*
-     * Robertson/Sparck Jones IDF.
+     * ---------------------------------------------------
+     * 1. BUILD POSTGRESQL FULL-TEXT SEARCH QUERY
+     * ---------------------------------------------------
      *
-     * +1 keeps the logarithm stable.
+     * websearch_to_tsquery() converts the user's natural
+     * language query into a PostgreSQL tsquery.
+     *
+     * Example:
+     *
+     * "retrieval augmented generation"
+     *
+     * becomes a PostgreSQL-compatible search query.
      */
 
-    const idf = Math.log(
-      (
-        (
-          totalDocuments -
-          frequency +
-          0.5
-        ) /
-        (
-          frequency +
-          0.5
+    const result =
+      await pool.query<LexicalRow>(
+        `
+        WITH search AS (
+          SELECT websearch_to_tsquery(
+            'english',
+            $1
+          ) AS query
         )
-      ) + 1,
-    );
 
-    const lengthNormalization =
-      1 -
-      B +
-      B *
-        (
-          document.length /
-          averageDocumentLength
-        );
+        SELECT
+          dc.id,
+          dc.document_id,
+          dc.chunk_index,
+          dc.content,
+          dc.page_numbers,
+          dc.metadata,
+          dc.embedding_model,
 
-    const termScore =
-      idf *
-      (
-        (
-          termFrequency *
-          (K1 + 1)
-        ) /
-        (
-          termFrequency +
-          K1 *
-          lengthNormalization
-        )
+          ts_rank_cd(
+            to_tsvector(
+              'english',
+              dc.content
+            ),
+            search.query
+          ) AS score
+
+        FROM document_chunks AS dc
+        CROSS JOIN search
+
+        WHERE
+          to_tsvector(
+            'english',
+            dc.content
+          )
+          @@ search.query
+
+        ORDER BY score DESC
+
+        LIMIT $2
+        `,
+        [
+          query,
+          topK,
+        ],
       );
 
-    score += termScore;
-  }
+    /*
+     * ---------------------------------------------------
+     * 2. CONVERT DATABASE ROWS TO RetrievalResult
+     * ---------------------------------------------------
+     */
 
-  return score;
+    return result.rows.map((row) => {
+      const chunk:
+        EmbeddedDocumentChunk = {
+        id: row.id,
+
+        documentId:
+          row.document_id,
+
+        content:
+          row.content,
+
+        chunkIndex:
+          row.chunk_index,
+
+        pageNumbers:
+          row.page_numbers,
+
+        metadata:
+          row.metadata,
+
+        embedding: {
+          model:
+            row.embedding_model ??
+            'unknown',
+
+          dimensions: 768,
+
+          /*
+           * The actual embedding isn't required by
+           * lexical retrieval, so we don't fetch it.
+           */
+          vector: [],
+        },
+      };
+
+      return {
+        chunk,
+
+        score:
+          row.score,
+      };
+    });
+  }
 }

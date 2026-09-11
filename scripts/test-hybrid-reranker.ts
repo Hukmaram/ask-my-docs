@@ -16,11 +16,7 @@ const hybridRetriever =
   new HybridRetriever(
     vectorRetriever,
     bm25Retriever,
-    {
-      vectorTopK: 10,
-      bm25TopK: 10,
-      topK: 10,
-    },
+   60
   );
 
 const reranker =

@@ -6,9 +6,7 @@ const retriever =
   new BM25Retriever();
 
 const queries = [
-  'What is Retrieval-Augmented Generation?',
-  'How does dense retrieval work?',
-  'Why are citations important in a RAG system?',
+  'How does retrieval augmented generation improve knowledge intensive NLP tasks?',
 ];
 
 async function main(): Promise<void> {

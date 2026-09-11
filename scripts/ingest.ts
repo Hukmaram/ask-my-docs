@@ -1,16 +1,13 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-
 import { loadPapersConfig } from '../src/config/papers.loader.js';
+
 import { ArxivClient } from '../src/ingestion/sources/arxiv.client.js';
 import { PdfDownloader } from '../src/ingestion/downloaders/pdf.downloader.js';
 import { PdfLoader } from '../src/ingestion/loaders/pdf.loader.js';
 import { DocumentChunker } from '../src/ingestion/chunkers/document.chunker.js';
+
 import { EmbeddingService } from '../src/embeddings/embedding.service.js';
 
-const PROCESSED_DATA_DIR = path.resolve(
-  'data/processed',
-);
+import { DocumentRepository } from '../src/db/repositories/document.repository.js';
 
 async function main(): Promise<void> {
   /*
@@ -42,22 +39,12 @@ async function main(): Promise<void> {
   const embeddingService =
     new EmbeddingService();
 
-  /*
-   * -------------------------------------------------------
-   * 3. CREATE OUTPUT DIRECTORY
-   * -------------------------------------------------------
-   */
-
-  await mkdir(
-    PROCESSED_DATA_DIR,
-    {
-      recursive: true,
-    },
-  );
+  const documentRepository =
+    new DocumentRepository();
 
   /*
    * -------------------------------------------------------
-   * 4. PROCESS EACH PAPER
+   * 3. PROCESS EACH PAPER
    * -------------------------------------------------------
    */
 
@@ -158,18 +145,18 @@ async function main(): Promise<void> {
 
     /*
      * ---------------------------------------------------
-     * CREATE PROCESSED DOCUMENT
+     * SAVE TO DATABASE
      * ---------------------------------------------------
      *
-     * We save:
+     * PostgreSQL stores:
      *
-     * - paper metadata
+     * - paper/document metadata
      * - extracted pages
      * - chunks
      * - embeddings
      */
 
-    const result = {
+    await documentRepository.saveDocument({
       paper: {
         id: paper.id,
         title: paper.title,
@@ -183,32 +170,10 @@ async function main(): Promise<void> {
       pages,
 
       chunks: embeddedChunks,
-    };
-
-    /*
-     * ---------------------------------------------------
-     * SAVE JSON
-     * ---------------------------------------------------
-     */
-
-    const outputPath =
-      path.join(
-        PROCESSED_DATA_DIR,
-        `${paper.id}.json`,
-      );
-
-    await writeFile(
-      outputPath,
-      JSON.stringify(
-        result,
-        null,
-        2,
-      ),
-      'utf-8',
-    );
+    });
 
     console.log(
-      `Saved: ${outputPath}`,
+      `Saved ${paper.id} to PostgreSQL.`,
     );
 
     /*
@@ -239,5 +204,5 @@ main().catch((error: unknown) => {
 
   console.error(error);
 
-  // process.exit(1);
+  process.exitCode = 1;
 });

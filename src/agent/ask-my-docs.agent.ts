@@ -1,11 +1,13 @@
-import '../instrumentation.js';
 import {
   startActiveObservation,
 } from '@langfuse/tracing';
 
 import { HybridRetriever } from '../retrieval/hybrid.retriever.js';
 
-import type { RetrievalResult } from '../types/retrieval.js';
+import type {
+  RetrievalExecution,
+  RetrievalResult,
+} from '../types/retrieval.js';
 
 import type { Reranker } from '../reranking/reranker.js';
 
@@ -32,12 +34,17 @@ import {
 
 export interface AskMyDocsResponse {
   answer: string;
+
   sources: RetrievalResult[];
+
   citations: string[];
 
   citationValidation: CitationValidationResult;
 
+  retrieval?: RetrievalExecution;
+
   faithfulness?: FaithfulnessResult;
+
   relevance?: AnswerRelevanceResult;
 }
 
@@ -68,69 +75,88 @@ export class AskMyDocsAgent {
 
         try {
           /*
-           * ==========================================
+           * --------------------------------------------------
            * 1. RETRIEVAL
-           * ==========================================
+           * --------------------------------------------------
+           *
+           * Vector + BM25 + Hybrid are calculated once.
            */
-
-          const candidates =
+          const retrieval =
             await startActiveObservation(
               'retrieval',
-              async (retrieval) => {
-                retrieval.update({
+              async (retrievalObservation) => {
+                retrievalObservation.update({
                   input: {
                     query,
                   },
                 });
 
-                const results =
-                  await this.retriever.retrieve(query);
+                const execution =
+                  await this.retriever
+                    .retrieveWithStages(
+                      query,
+                      10,
+                    );
 
-                retrieval.update({
+                retrievalObservation.update({
                   output: {
-                    resultCount: results.length,
-                    chunkIds: results.map(
-                      (result) =>
-                        result.chunk.id,
-                    ),
+                    vectorCount:
+                      execution.vector.length,
+
+                    bm25Count:
+                      execution.bm25.length,
+
+                    hybridCount:
+                      execution.hybrid.length,
+
+                    vectorChunkIds:
+                      execution.vector.map(
+                        (result) =>
+                          result.chunk.id,
+                      ),
+
+                    bm25ChunkIds:
+                      execution.bm25.map(
+                        (result) =>
+                          result.chunk.id,
+                      ),
+
+                    hybridChunkIds:
+                      execution.hybrid.map(
+                        (result) =>
+                          result.chunk.id,
+                      ),
                   },
                   metadata: {
-                    topK: String(
-                      results.length,
-                    ),
+                    topK: '10',
+                    rrfK: '60',
                   },
                 });
 
-                return results;
+                return execution;
               },
               {
                 asType: 'retriever',
               },
             );
 
-          /*
-           * ==========================================
-           * NO RESULTS
-           * ==========================================
-           */
-
-          if (candidates.length === 0) {
+          if (retrieval.hybrid.length === 0) {
             const answer =
               'I could not find relevant information in the available documents.';
 
-            const response: AskMyDocsResponse =
-              {
-                answer,
-                sources: [],
+            const response: AskMyDocsResponse = {
+              answer,
+              sources: [],
+              citations: [],
+              citationValidation: {
+                valid: false,
                 citations: [],
-                citationValidation: {
-                  valid: false,
-                  citations: [],
-                  invalidCitations: [],
-                  missingCitations: true,
-                  uncitedSentences: [],
-                },
-              };
+                invalidCitations: [],
+                missingCitations: true,
+                uncitedSentences: [],
+              },
+              retrieval,
+            };
 
             trace.update({
               output: response,
@@ -140,22 +166,22 @@ export class AskMyDocsAgent {
           }
 
           /*
-           * ==========================================
+           * --------------------------------------------------
            * 2. RERANKING
-           * ==========================================
+           * --------------------------------------------------
            */
-
           const reranked =
             await startActiveObservation(
               'reranking',
-              async (reranking) => {
-                reranking.update({
+              async (rerankingObservation) => {
+                rerankingObservation.update({
                   input: {
                     query,
                     candidateCount:
-                      candidates.length,
+                      retrieval.hybrid.length,
+
                     candidateIds:
-                      candidates.map(
+                      retrieval.hybrid.map(
                         (candidate) =>
                           candidate.chunk.id,
                       ),
@@ -165,23 +191,27 @@ export class AskMyDocsAgent {
                 const results =
                   await this.reranker.rerank(
                     query,
-                    candidates,
+                    retrieval.hybrid,
                     5,
                   );
 
-                reranking.update({
+                rerankingObservation.update({
                   output: {
                     resultCount:
                       results.length,
-                    chunkIds: results.map(
-                      (result) =>
-                        result.chunk.id,
-                    ),
-                    scores: results.map(
-                      (result) =>
-                        result.rerankScore ??
-                        result.score,
-                    ),
+
+                    chunkIds:
+                      results.map(
+                        (result) =>
+                          result.chunk.id,
+                      ),
+
+                    scores:
+                      results.map(
+                        (result) =>
+                          result.rerankScore ??
+                          result.score,
+                      ),
                   },
                 });
 
@@ -189,18 +219,24 @@ export class AskMyDocsAgent {
               },
             );
 
+          /*
+           * Save reranked results in the execution.
+           */
+          retrieval.reranked =
+            reranked;
+
+          /*
+           * Only the top 2 sources are sent
+           * to the generator.
+           */
           const sources =
             reranked.slice(0, 2);
 
           /*
-           * ==========================================
+           * --------------------------------------------------
            * 3. GENERATION
-           * ==========================================
-           *
-           * OllamaClient.generate() creates the
-           * generation observation.
+           * --------------------------------------------------
            */
-
           const prompt =
             buildRagPrompt(
               query,
@@ -208,38 +244,48 @@ export class AskMyDocsAgent {
             );
 
           let answer =
-            await this.llm.generate(prompt);
+            await this.llm.generate(
+              prompt,
+            );
 
           /*
-           * ==========================================
+           * --------------------------------------------------
            * 4. CITATION VALIDATION
-           * ==========================================
+           * --------------------------------------------------
            */
-
           let citationValidation =
             await startActiveObservation(
               'citation-validation',
-              async (validation) => {
+              async (
+                validationObservation,
+              ) => {
                 const result =
                   validateCitations(
                     answer,
                     sources,
                   );
 
-                validation.update({
+                validationObservation.update({
                   input: {
                     answer,
                   },
+
                   output: {
-                    valid: result.valid,
+                    valid:
+                      result.valid,
+
                     citations:
                       result.citations,
+
                     invalidCitations:
                       result.invalidCitations,
+
                     missingCitations:
                       result.missingCitations,
+
                     uncitedSentenceCount:
-                      result.uncitedSentences
+                      result
+                        .uncitedSentences
                         .length,
                   },
                 });
@@ -252,17 +298,18 @@ export class AskMyDocsAgent {
             );
 
           /*
-           * ==========================================
+           * --------------------------------------------------
            * 5. CITATION REPAIR
-           * ==========================================
+           * --------------------------------------------------
            */
-
           if (!citationValidation.valid) {
             answer =
               await startActiveObservation(
                 'citation-repair',
-                async (repair) => {
-                  repair.update({
+                async (
+                  repairObservation,
+                ) => {
+                  repairObservation.update({
                     input: {
                       answer,
                     },
@@ -274,11 +321,14 @@ export class AskMyDocsAgent {
                       sources,
                     );
 
-                  repair.update({
+                  repairObservation.update({
                     output: {
                       changed:
-                        repaired !== answer,
-                      answer: repaired,
+                        repaired !==
+                        answer,
+
+                      answer:
+                        repaired,
                     },
                   });
 
@@ -286,33 +336,38 @@ export class AskMyDocsAgent {
                 },
               );
 
-            /*
-             * Re-validate after repair.
-             */
-
             citationValidation =
               await startActiveObservation(
                 'citation-validation-after-repair',
-                async (validation) => {
+                async (
+                  validationObservation,
+                ) => {
                   const result =
                     validateCitations(
                       answer,
                       sources,
                     );
 
-                  validation.update({
+                  validationObservation.update({
                     input: {
                       answer,
                     },
+
                     output: {
                       valid:
                         result.valid,
+
                       citations:
                         result.citations,
+
                       invalidCitations:
-                        result.invalidCitations,
+                        result
+                          .invalidCitations,
+
                       missingCitations:
-                        result.missingCitations,
+                        result
+                          .missingCitations,
+
                       uncitedSentenceCount:
                         result
                           .uncitedSentences
@@ -329,22 +384,24 @@ export class AskMyDocsAgent {
           }
 
           /*
-           * ==========================================
-           * CITATION FAILURE
-           * ==========================================
-           *
-           * Do not run faithfulness/relevance if
-           * citation validation still fails.
+           * If citations are still invalid,
+           * fail safely.
            */
-
-          if (!citationValidation.valid) {
+          if (
+            !citationValidation.valid
+          ) {
             const response: AskMyDocsResponse =
               {
                 answer,
                 sources,
+
                 citations:
-                  citationValidation.citations,
+                  citationValidation
+                    .citations,
+
                 citationValidation,
+
+                retrieval,
               };
 
             trace.update({
@@ -355,32 +412,35 @@ export class AskMyDocsAgent {
           }
 
           /*
-           * ==========================================
+           * --------------------------------------------------
            * 6. FAITHFULNESS
-           * ==========================================
-           *
-           * FaithfulnessEvaluator internally calls
-           * OllamaClient.generate(), which creates
-           * a nested generation observation.
+           * --------------------------------------------------
            */
-
           const faithfulness =
             await startActiveObservation(
               'faithfulness',
-              async (evaluation) => {
+              async (
+                evaluationObservation,
+              ) => {
                 const result =
-                  await this.faithfulnessEvaluator.evaluate(
-                    answer,
-                    sources,
-                  );
+                  await this
+                    .faithfulnessEvaluator
+                    .evaluate(
+                      answer,
+                      sources,
+                    );
 
-                evaluation.update({
+                evaluationObservation.update({
                   input: {
                     answer,
                   },
+
                   output: {
-                    score: result.score,
-                    claims: result.claims,
+                    score:
+                      result.score,
+
+                    claims:
+                      result.claims,
                   },
                 });
 
@@ -392,30 +452,39 @@ export class AskMyDocsAgent {
             );
 
           /*
-           * ==========================================
+           * --------------------------------------------------
            * 7. ANSWER RELEVANCE
-           * ==========================================
+           * --------------------------------------------------
            */
-
           const relevance =
             await startActiveObservation(
               'answer-relevance',
-              async (evaluation) => {
+              async (
+                evaluationObservation,
+              ) => {
                 const result =
-                  await this.relevanceEvaluator.evaluate(
-                    query,
-                    answer,
-                  );
+                  await this
+                    .relevanceEvaluator
+                    .evaluate(
+                      query,
+                      answer,
+                    );
 
-                evaluation.update({
+                evaluationObservation.update({
                   input: {
-                    question: query,
+                    question:
+                      query,
+
                     answer,
                   },
+
                   output: {
-                    score: result.score,
+                    score:
+                      result.score,
+
                     explanation:
-                      result.explanation,
+                      result
+                        .explanation,
                   },
                 });
 
@@ -427,35 +496,67 @@ export class AskMyDocsAgent {
             );
 
           /*
-           * ==========================================
-           * FINAL RESPONSE
-           * ==========================================
+           * --------------------------------------------------
+           * 8. FINAL RESPONSE
+           * --------------------------------------------------
            */
-
           const response: AskMyDocsResponse =
             {
               answer,
+
               sources,
+
               citations:
-                citationValidation.citations,
+                citationValidation
+                  .citations,
+
               citationValidation,
+
+              retrieval,
+
               faithfulness,
+
               relevance,
             };
 
           trace.update({
             output: {
               answer,
+
               sourceCount:
                 sources.length,
+
               citations:
-                citationValidation.citations,
+                citationValidation
+                  .citations,
+
               citationValid:
-                citationValidation.valid,
+                citationValidation
+                  .valid,
+
               faithfulness:
                 faithfulness.score,
+
               relevance:
                 relevance.score,
+
+              retrieval: {
+                vectorCount:
+                  retrieval.vector
+                    .length,
+
+                bm25Count:
+                  retrieval.bm25
+                    .length,
+
+                hybridCount:
+                  retrieval.hybrid
+                    .length,
+
+                rerankedCount:
+                  retrieval.reranked
+                    .length,
+              },
             },
           });
 

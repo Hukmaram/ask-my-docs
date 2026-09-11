@@ -2,19 +2,18 @@ import { BM25Retriever } from '../src/retrieval/bm25.retriever.js';
 import { HybridRetriever } from '../src/retrieval/hybrid.retriever.js';
 import { VectorRetriever } from '../src/retrieval/vector.retriever.js';
 
-const vectorRetriever = new VectorRetriever();
-const bm25Retriever = new BM25Retriever();
+const vectorRetriever =
+  new VectorRetriever();
 
-const hybridRetriever = new HybridRetriever(
-  vectorRetriever,
-  bm25Retriever,
-  {
-    vectorTopK: 10,
-    bm25TopK: 10,
-    topK: 10,
-    rrfK: 60,
-  },
-);
+const bm25Retriever =
+  new BM25Retriever();
+
+const hybridRetriever =
+  new HybridRetriever(
+    vectorRetriever,
+    bm25Retriever,
+    60,
+  );
 
 const query =
   'How does retrieval augmented generation improve knowledge intensive NLP tasks?';
@@ -22,7 +21,10 @@ const query =
 console.log(`\nQuery: ${query}\n`);
 
 const results =
-  await hybridRetriever.retrieve(query);
+  await hybridRetriever.retrieve(
+    query,
+    10,
+  );
 
 console.log(
   `Hybrid results: ${results.length}\n`,

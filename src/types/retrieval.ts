@@ -2,7 +2,6 @@ import type { EmbeddedDocumentChunk } from './document.js';
 
 export interface RetrievalResult {
   chunk: EmbeddedDocumentChunk;
-
   score: number;
 
   vectorScore?: number;
@@ -13,4 +12,11 @@ export interface RetrievalResult {
 
   rrfScore?: number;
   rerankScore?: number;
+}
+
+export interface RetrievalExecution {
+  vector: RetrievalResult[];
+  bm25: RetrievalResult[];
+  hybrid: RetrievalResult[];
+  reranked: RetrievalResult[];
 }
